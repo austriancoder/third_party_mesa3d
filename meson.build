@@ -428,6 +428,8 @@ if with_glx == 'auto'
     with_glx = 'disabled'
   elif with_platform_android
     with_glx = 'disabled'
+  elif with_platform_ohos
+    with_glx = 'disabled'
   elif with_dri
     with_glx = 'dri'
   elif with_platform_haiku
