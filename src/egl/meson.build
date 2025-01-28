@@ -105,7 +105,7 @@ if with_dri
     endif
     deps_for_egl += [dep_x11_xcb, dep_xcb_dri2, dep_xcb_xrandr, dep_xcb_xfixes, dep_xcb_shm]
   endif
-  if with_gbm and not with_platform_android
+  if with_gbm and not with_platform_android and not with_platform_ohos
     files_egl += files('drivers/dri2/platform_drm.c')
     link_for_egl += libgbm
     incs_for_egl += [inc_gbm, include_directories('../gbm/main')]

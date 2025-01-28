@@ -422,6 +422,11 @@ with_platform_windows = _platforms.contains('windows')
 with_platform_macos = _platforms.contains('macos')
 with_platform_ohos = _platforms.contains('ohos')
 
+if with_platform_ohos
+  pre_args += '-DHAVE_OHOS_PLATFORM'
+  system_has_kms_drm = false
+endif
+
 with_glx = get_option('glx')
 if with_glx == 'auto'
   if not with_opengl
