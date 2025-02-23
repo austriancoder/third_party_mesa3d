@@ -77,6 +77,8 @@ g_egldispatchstubs_h = custom_target(
   capture : true,
 )
 
+with_dri = false
+
 if with_dri
   files_egl += files(
     'drivers/dri2/egl_dri2.c',
