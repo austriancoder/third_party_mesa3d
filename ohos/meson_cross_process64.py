@@ -66,6 +66,7 @@ cpp_link_args = [
     '-Wl,--exclude-libs=libvpx_assembly_arm.a',
     '-Wl,--warn-shared-textrel',
     '--rtlib=compiler-rt',
+    '-static-libstdc++',
     ]
 	
 [binaries]
