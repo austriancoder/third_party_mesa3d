@@ -107,12 +107,6 @@ if with_dri
     endif
     deps_for_egl += [dep_x11_xcb, dep_xcb_dri2, dep_xcb_xrandr, dep_xcb_xfixes, dep_xcb_shm]
   endif
-  if with_gbm and not with_platform_android and not with_platform_ohos
-    files_egl += files('drivers/dri2/platform_drm.c')
-    link_for_egl += libgbm
-    incs_for_egl += [inc_gbm, include_directories('../gbm/main')]
-    deps_for_egl += dep_libdrm
-  endif
   if with_platform_wayland
     deps_for_egl += [dep_wayland_client, dep_wayland_server, dep_wayland_egl_headers]
     link_for_egl += [libwayland_drm, libloader_wayland_helper]
@@ -137,6 +131,16 @@ elif with_platform_haiku
 
   link_for_egl += [libmesa, libgallium, libswhgl, libsthgl]
   deps_for_egl += [cpp.find_library('be'), driver_swrast]
+elif with_platform_ohos
+  files_egl += files('drivers/ohos/egl_ohos.c')
+
+  incs_for_egl += [inc_gallium, inc_gallium_aux]
+  incs_for_egl += [inc_mesa, inc_mapi]
+
+  link_for_egl += [libmesa, libgallium]
+  link_for_egl += [libmesa, libzink]
+
+  #deps_for_egl += [dependency('libsurface')]
 elif with_platform_windows
   c_args_for_egl += [
     '-DEGLAPI=', '-DPUBLIC='
