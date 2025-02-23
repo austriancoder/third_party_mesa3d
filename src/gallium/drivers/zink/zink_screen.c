@@ -285,6 +285,8 @@ disk_cache_init(struct zink_screen *screen)
    if (zink_debug & ZINK_DEBUG_SHADERDB)
       return true;
 
+   return true;
+
 #ifdef ENABLE_SHADER_CACHE
    struct mesa_blake3 ctx;
    _mesa_blake3_init(&ctx);
