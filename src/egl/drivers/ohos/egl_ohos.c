@@ -22,7 +22,7 @@
 
 #include "gallium/drivers/zink/zink_public.h"
 
-//#include <external_window.h>
+#include <external_window.h>
 
 _EGL_DRIVER_STANDARD_TYPECASTS(ohos_egl)
 
@@ -269,7 +269,7 @@ ohos_create_window_surface(_EGLDisplay *disp, _EGLConfig *conf,
    // SET_USAGE 0x5 0x109
 
    int32_t format = 0;
-   //OH_NativeWindow_NativeWindowHandleOpt(native_window, GET_FORMAT, &format);
+   OH_NativeWindow_NativeWindowHandleOpt(native_window, GET_FORMAT, &format);
 
    _eglLog(_EGL_DEBUG, "format: %x", format);
 

@@ -140,7 +140,7 @@ elif with_platform_ohos
   link_for_egl += [libmesa, libgallium]
   link_for_egl += [libmesa, libzink]
 
-  #deps_for_egl += [dependency('libsurface')]
+  deps_for_egl += [dependency('libsurface')]
 elif with_platform_windows
   c_args_for_egl += [
     '-DEGLAPI=', '-DPUBLIC='
