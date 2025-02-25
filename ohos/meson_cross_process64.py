@@ -43,14 +43,14 @@ cpp_args = [
     '--sysroot=sysroot_stub',
     '-fno-emulated-tls',
     '-fPIC']
-    
+
 c_link_args = [
     '--target=aarch64-linux-ohosmusl',
     '-fPIC',
     '--sysroot=sysroot_stub',
     '-Lsysroot_stub/usr/lib/aarch64-linux-ohos',
-    '-Lproject_stub/prebuilts/clang/ohos/linux-x86_64/llvm/lib/clang/current/lib/aarch64-linux-ohos',
-    '-Lproject_stub/prebuilts/clang/ohos/linux-x86_64/llvm/lib/aarch64-linux-ohos/c++',
+    '-Lproject_stub/out/sdk/packages/ohos-sdk/linux/native/llvm/lib/clang/15.0.4/lib/aarch64-linux-ohos',
+    '-Lproject_stub/out/sdk/packages/ohos-sdk/linux/native/llvm/lib/aarch64-linux-ohos/c++',
     '--rtlib=compiler-rt',
     ]
 
@@ -58,8 +58,8 @@ cpp_link_args = [
     '--target=aarch64-linux-ohosmusl',
     '--sysroot=sysroot_stub',
     '-Lsysroot_stub/usr/lib/aarch64-linux-ohos',
-    '-Lproject_stub/prebuilts/clang/ohos/linux-x86_64/llvm/lib/clang/current/lib/aarch64-linux-ohos',
-    '-Lproject_stub/prebuilts/clang/ohos/linux-x86_64/llvm/lib/aarch64-linux-ohos/c++',
+    '-Lproject_stub/out/sdk/packages/ohos-sdk/linux/native/llvm/lib/clang/15.0.4/lib/aarch64-linux-ohos',
+    '-Lproject_stub/out/sdk/packages/ohos-sdk/linux/native/llvm/lib/aarch64-linux-ohos/c++',
     '-fPIC',
     '-Wl,--exclude-libs=libunwind_llvm.a',
     '-Wl,--exclude-libs=libc++_static.a',
@@ -67,14 +67,14 @@ cpp_link_args = [
     '-Wl,--warn-shared-textrel',
     '--rtlib=compiler-rt',
     ]
-	
+
 [binaries]
-ar = 'project_stub/prebuilts/clang/ohos/linux-x86_64/llvm/bin/llvm-ar'
-c = ['ccache', 'project_stub/prebuilts/clang/ohos/linux-x86_64/llvm/bin/clang']
-cpp = ['ccache', 'project_stub/prebuilts/clang/ohos/linux-x86_64/llvm/bin/clang++']
+ar = 'project_stub/out/sdk/packages/ohos-sdk/linux/native/llvm/bin/llvm-ar'
+c = ['ccache', 'project_stub/out/sdk/packages/ohos-sdk/linux/native/llvm/bin/clang']
+cpp = ['ccache', 'project_stub/out/sdk/packages/ohos-sdk/linux/native/llvm/bin/clang++']
 c_ld= 'lld'
 cpp_ld = 'lld'
-strip = 'project_stub/prebuilts/clang/ohos/linux-x86_64/llvm/bin/llvm-strip'
+strip = 'project_stub/out/sdk/packages/ohos-sdk/linux/native/llvm/bin/llvm-strip'
 pkgconfig = '/usr/bin/pkg-config'
 
 [host_machine]
