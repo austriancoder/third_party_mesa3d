@@ -38,6 +38,14 @@ void LoadVendors(void)
     char **tokens;
     int i;
 
+    __EGLvendorInfo *vendor = LoadVendor("libEGL_mesa.so.0", NULL);
+
+    if (vendor) {
+        glvnd_list_append(&vendor->entry, &__eglVendorList);
+    }
+
+    return;
+
     // First, check to see if a list of vendors was specified.
     if (getuid() == geteuid() && getgid() == getegid()) {
         env = getenv("__EGL_VENDOR_LIBRARY_FILENAMES");
