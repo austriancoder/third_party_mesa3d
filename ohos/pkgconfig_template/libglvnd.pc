@@ -1,0 +1,6 @@
+includedir=../libglvnd/include/
+
+Name: libglvnd
+Version: 2.4.1
+Description: libglvnd
+Cflags: -I${includedir}
