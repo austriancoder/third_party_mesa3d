@@ -91,7 +91,9 @@ python3 ohos/build_ohos64.py  /home/openharmony/workdir rpi4 /home/openharmony/w
 ## Deploy into demo application
 
  ```
-cp /home/openharmony/workdir/third_party/mesa3d/build-ohos/install/lib/libEGL.so.1 entry/libs/arm64-v8a/
-cp /home/openharmony/workdir/third_party/mesa3d/build-ohos/install/lib/libGLESv2.so.2 entry/libs/arm64-v8a/
+cp /home/openharmony/workdir/third_party/mesa3d/build-ohos/install/lib/libEGL_mesa.so.0 entry/libs/arm64-v8a/
 cp /home/openharmony/workdir/third_party/mesa3d/build-ohos/install/lib/libgallium-25.1.0-devel.so entry/libs/arm64-v8a/
+cp /home/openharmony/workdir/third_party/mesa3d/libglvnd/build/src/EGL/libEGL.so.1 entry/libs/arm64-v8a/
+cp /home/openharmony/workdir/third_party/mesa3d/libglvnd/build/src/GLdispatch/libGLdispatch.so.0 entry/libs/arm64-v8a/
+cp /home/openharmony/workdir/third_party/mesa3d/libglvnd/build/src/OpenGL/libOpenGL.so.0 entry/libs/arm64-v8a/
  ```
