@@ -31,7 +31,7 @@ if __name__ == '__main__':
     run_cross_pross_cmd = 'python3 ' + script_dir + '/meson_cross_process64.py ' + sys.argv[1] + ' ' + sys.argv[2]
     os.system(run_cross_pross_cmd)
 
-    run_build_libglvnd = 'meson libglvnd libglvnd/build -Dgles1=false -Dgles2=false -Dglx=disabled -Dx11=disabled --cross-file=../cross_file ; ninja -C libglvnd/build'
+    run_build_libglvnd = 'meson libglvnd libglvnd/build -Dgles1=false -Dgles2=false -Dglx=disabled -Dx11=disabled --cross-file=./cross_file ; ninja -C libglvnd/build'
     print("libglvnd build command: %s" %run_build_libglvnd)
     os.system(run_build_libglvnd)
 
