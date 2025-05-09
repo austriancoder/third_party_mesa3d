@@ -39,7 +39,7 @@ if __name__ == '__main__':
     run_build_cmd += 'meson setup '+ sys.argv[3] + ' build-ohos '
     run_build_cmd += '-Dplatforms=ohos -Degl-native-platform=ohos -Dgallium-drivers=zink -Dbuildtype=debug \
                       -Dvulkan-drivers= -Degl=enabled -Dgles1=disabled -Dgles2=disabled -Dopengl=true -Dcpp_rtti=false -Dglx=disabled -Dtools= \
-                      -Dglvnd=enabled -Dshared-glapi=enabled -Dshader-cache=disabled '
+                      -Dglvnd=true -Dshared-glapi=enabled -Dshader-cache=disabled '
     run_build_cmd += '--cross-file=cross_file '
     run_build_cmd += '--prefix=' + os.getcwd() + '/build-ohos/install'
     print("build command: %s" %run_build_cmd)
