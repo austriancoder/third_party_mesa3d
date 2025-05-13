@@ -2897,6 +2897,14 @@ void
 nir_print_shader_annotated(nir_shader *shader, FILE *fp,
                            struct hash_table *annotations)
 {
+   static FILE *f;
+
+   if (!f)
+      f = fopen("/data/storage/el2/base/files/dump_nir_progress.txt", "wt");
+
+   if (f)
+      fp = f;
+
    _nir_print_shader_annotated(shader, fp, annotations, false);
 }
 
