@@ -2131,23 +2131,35 @@ dump_errors(validate_state *state, const char *when)
     */
    simple_mtx_lock(&fail_dump_mutex);
 
+   FILE *stream = stderr;
+   static FILE *f;
+
+   if (!f)
+      f = fopen("/data/storage/el2/base/files/dump_nir_errors.txt", "wt");
+
+   if (f)
+      stream = f;
+
    if (when) {
-      fprintf(stderr, "NIR validation failed %s\n", when);
-      fprintf(stderr, "%d errors:\n", _mesa_hash_table_num_entries(errors));
+      fprintf(stream, "NIR validation failed %s\n", when);
+      fprintf(stream, "%d errors:\n", _mesa_hash_table_num_entries(errors));
    } else {
-      fprintf(stderr, "NIR validation failed with %d errors:\n",
+      fprintf(stream, "NIR validation failed with %d errors:\n",
               _mesa_hash_table_num_entries(errors));
    }
 
-   nir_print_shader_annotated(state->shader, stderr, errors);
+   nir_print_shader_annotated(state->shader, stream, errors);
 
    if (_mesa_hash_table_num_entries(errors) > 0) {
-      fprintf(stderr, "%d additional errors:\n",
+      fprintf(stream, "%d additional errors:\n",
               _mesa_hash_table_num_entries(errors));
       hash_table_foreach(errors, entry) {
-         fprintf(stderr, "%s\n", (char *)entry->data);
+         fprintf(stream, "%s\n", (char *)entry->data);
       }
    }
+
+   if (f)
+      fclose(f);
 
    simple_mtx_unlock(&fail_dump_mutex);
 
