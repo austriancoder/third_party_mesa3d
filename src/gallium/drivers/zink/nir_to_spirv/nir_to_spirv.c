@@ -628,10 +628,39 @@ get_glsl_type(struct ntv_context *ctx, const struct glsl_type *type, bool implic
          types[i] = get_glsl_type(ctx, glsl_get_struct_field(type, i), implicit_stride);
       ret = spirv_builder_type_struct(&ctx->builder, types,
                                       glsl_get_length(type));
-      for (unsigned i = 0; i < glsl_get_length(type); i++) {
-         int32_t offset = glsl_get_struct_field_offset(type, i);
-         if (offset >= 0)
-            spirv_builder_emit_member_offset(&ctx->builder, ret, i, offset);
+
+      if (strcmp(glsl_get_type_name(type), "gl_PerVertex") == 0) {
+         spirv_builder_emit_name(&ctx->builder, ret, "gl_PerVertex");
+
+         for (unsigned i = 0; i < glsl_get_length(type); i++) {
+            const glsl_struct_field *data = glsl_get_struct_field_data(type, i);
+            const char *name = glsl_get_struct_elem_name(type, i);
+
+            spirv_builder_emit_member_name(&ctx->builder, ret, i, name);
+
+            switch (data->location) {
+            case VARYING_SLOT_POS:
+               spirv_builder_emit_member_builtin(&ctx->builder, ret, i, SpvBuiltInPosition);
+               break;
+            case VARYING_SLOT_PSIZ:
+               spirv_builder_emit_member_builtin(&ctx->builder, ret, i, SpvBuiltInPointSize);
+               break;
+            case VARYING_SLOT_CLIP_DIST0:
+               spirv_builder_emit_member_builtin(&ctx->builder, ret, i, SpvBuiltInClipDistance);
+               break;
+
+            default:
+               break;
+            }
+         }
+
+         spirv_builder_emit_decoration(&ctx->builder, ret, SpvDecorationBlock);
+      } else {
+         for (unsigned i = 0; i < glsl_get_length(type); i++) {
+            int32_t offset = glsl_get_struct_field_offset(type, i);
+            if (offset >= 0)
+               spirv_builder_emit_member_offset(&ctx->builder, ret, i, offset);
+         }
       }
    } else
       unreachable("Unhandled GLSL type");
@@ -820,8 +849,8 @@ emit_input(struct ntv_context *ctx, struct nir_variable *var)
       emit_interpolation(ctx, var_id, var->data.interpolation);
    } else if (ctx->stage < MESA_SHADER_FRAGMENT) {
       switch (var->data.location) {
-      HANDLE_EMIT_BUILTIN(POS, Position);
-      HANDLE_EMIT_BUILTIN(PSIZ, PointSize);
+      // HANDLE_EMIT_BUILTIN(POS, Position);
+      // HANDLE_EMIT_BUILTIN(PSIZ, PointSize);
       HANDLE_EMIT_BUILTIN(LAYER, Layer);
       HANDLE_EMIT_BUILTIN(PRIMITIVE_ID, PrimitiveId);
       HANDLE_EMIT_BUILTIN(CULL_DIST0, CullDistance);
@@ -832,6 +861,10 @@ emit_input(struct ntv_context *ctx, struct nir_variable *var)
       case VARYING_SLOT_CLIP_DIST0:
          assert(glsl_type_is_array(var->type));
          spirv_builder_emit_builtin(&ctx->builder, var_id, SpvBuiltInClipDistance);
+         break;
+
+      case VARYING_SLOT_POS:
+      case VARYING_SLOT_PSIZ:
          break;
 
       default:
@@ -876,15 +909,20 @@ emit_output(struct ntv_context *ctx, struct nir_variable *var)
 
    if (ctx->stage != MESA_SHADER_FRAGMENT) {
       switch (var->data.location) {
-      HANDLE_EMIT_BUILTIN(POS, Position);
-      HANDLE_EMIT_BUILTIN(PSIZ, PointSize);
+      // HANDLE_EMIT_BUILTIN(POS, Position);
+      // HANDLE_EMIT_BUILTIN(PSIZ, PointSize);
       HANDLE_EMIT_BUILTIN(LAYER, Layer);
       HANDLE_EMIT_BUILTIN(PRIMITIVE_ID, PrimitiveId);
       HANDLE_EMIT_BUILTIN(CLIP_DIST0, ClipDistance);
-      HANDLE_EMIT_BUILTIN(CULL_DIST0, CullDistance);
+      // HANDLE_EMIT_BUILTIN(CULL_DIST0, CullDistance);
       HANDLE_EMIT_BUILTIN(VIEWPORT, ViewportIndex);
       HANDLE_EMIT_BUILTIN(TESS_LEVEL_OUTER, TessLevelOuter);
       HANDLE_EMIT_BUILTIN(TESS_LEVEL_INNER, TessLevelInner);
+
+      case VARYING_SLOT_POS:
+      case VARYING_SLOT_PSIZ:
+      case VARYING_SLOT_CULL_DIST0:
+         break;
 
       default:
          /* non-xfb psiz output will have location -1 */
