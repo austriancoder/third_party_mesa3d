@@ -152,56 +152,6 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
    }
 
    bool handle_flat = output_lines && nir->info.gs.output_primitive != gs_out_prim_for_topology(primitive_type);
-
-   // create gl_PerVertex interface
-   struct glsl_struct_field *fields = rzalloc_array(nir, struct glsl_struct_field, 4);
-   unsigned num_fields = 0;
-
-#define INIT_PER_VERTEX_FIELD(field_index, field_type, field_name, field_location) \
-      fields[field_index].type = field_type; \
-      fields[field_index].name = field_name; \
-      fields[field_index].matrix_layout = GLSL_MATRIX_LAYOUT_INHERITED; \
-      fields[field_index].location = field_location; \
-      fields[field_index].offset = field_index * 4; \
-      fields[field_index].interpolation = INTERP_MODE_NONE; \
-      fields[field_index].centroid = 0; \
-      fields[field_index].sample = 0; \
-      fields[field_index].patch = 0; \
-      fields[field_index].precision = GLSL_PRECISION_HIGH; \
-      fields[field_index].memory_read_only = 0; \
-      fields[field_index].memory_write_only = 0; \
-      fields[field_index].memory_coherent = 0; \
-      fields[field_index].memory_volatile = 0; \
-      fields[field_index].memory_restrict = 0; \
-      fields[field_index].image_format = PIPE_FORMAT_NONE; \
-      fields[field_index].explicit_xfb_buffer = 0; \
-      fields[field_index].xfb_buffer = -1; \
-      fields[field_index].xfb_stride = -1;
-
-
-   INIT_PER_VERTEX_FIELD(num_fields, glsl_vec4_type(), "gl_Position", VARYING_SLOT_POS);
-   num_fields++;
-   INIT_PER_VERTEX_FIELD(num_fields, glsl_float_type(), "gl_PointSize", VARYING_SLOT_PSIZ);
-   num_fields++;
-   const struct glsl_type *clip_dist_type = glsl_array_type(glsl_float_type(), 8, 0);
-   INIT_PER_VERTEX_FIELD(num_fields, clip_dist_type, "gl_ClipDistance", VARYING_SLOT_CLIP_DIST0);
-   num_fields++;
-
-   const struct glsl_type *per_vertex_type =
-      glsl_interface_type(fields, num_fields,GLSL_INTERFACE_PACKING_STD140,
-                          false, "gl_PerVertex");
-
-   const struct glsl_type *per_vertex_array_type =
-      glsl_array_type(per_vertex_type, 6, 0);
-
-   nir_variable *in_per_vertex =
-      nir_variable_create(b.shader, nir_var_shader_in, per_vertex_array_type, "gl_in");
-   in_per_vertex->interface_type = per_vertex_type;
-
-   nir_variable *out_per_vertex =
-      nir_variable_create(b.shader, nir_var_shader_out, per_vertex_type, "gl_out");
-   out_per_vertex->interface_type = per_vertex_type;
-
    nir_variable *in_vars[VARYING_SLOT_MAX * 4];
    nir_variable *out_vars[VARYING_SLOT_MAX * 4];
    unsigned num_inputs = 0, num_outputs = 0;
@@ -215,14 +165,6 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
       /* input vars can't be created for those */
       if (var->data.location == VARYING_SLOT_LAYER ||
           var->data.location == VARYING_SLOT_VIEW_INDEX)
-         continue;
-
-      /* gl_Position, gl_PointSize and gl_ClipDistance are part of gl_PerVertex,
-       * don't create separate variables for them.
-       */
-      if (var->data.location == VARYING_SLOT_POS ||
-         var->data.location == VARYING_SLOT_PSIZ ||
-          var->data.location == VARYING_SLOT_CLIP_DIST0)
          continue;
 
       char name[100];
@@ -306,35 +248,6 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
    nir_def *pv_vert_index = nir_bcsel(&b, last_pv_vert_def, end_vert_index, start_vert_index);
    for (unsigned i = start_vert; i < end_vert || needs_closing; i += vert_step) {
       int idx = i < end_vert ? i : start_vert;
-
-      // Get the derefs for the current input vertex and the output vertex
-      nir_deref_instr *in_pv_elem = nir_build_deref_array_imm(&b, nir_build_deref_var(&b, in_per_vertex), idx);
-      nir_deref_instr *out_pv = nir_build_deref_var(&b, out_per_vertex);
-
-      for (unsigned f = 0; f < num_fields; ++f) {
-         const struct glsl_struct_field *field = &fields[f];
-
-        uint64_t varying_bit_for_field = 0;
-        switch (field->location) {
-         case VARYING_SLOT_POS:
-            varying_bit_for_field = VARYING_BIT_POS;
-            break;
-         case VARYING_SLOT_PSIZ:
-            varying_bit_for_field = VARYING_BIT_PSIZ;
-            break;
-         case VARYING_SLOT_CLIP_DIST0:
-            varying_bit_for_field = VARYING_BIT_CLIP_DIST0;
-            break;
-         default:
-            continue;
-        }
-
-        if (prev_stage->info.outputs_written & varying_bit_for_field) {
-            copy_vars(&b, nir_build_deref_struct(&b, out_pv, f),
-                      nir_build_deref_struct(&b, in_pv_elem, f));
-        }
-      }
-
       /* Copy inputs to outputs. */
       for (unsigned j = 0, oj = 0; j < num_inputs; ++j) {
          if (in_vars[j]->data.location == VARYING_SLOT_EDGE) {
@@ -370,6 +283,7 @@ nir_create_passthrough_gs(const nir_shader_compiler_options *options,
             nir_def *edge_value = nir_channel(&b, nir_load_array_var_imm(&b, edge_var, idx), 0);
             nir_push_if(&b, nir_fneu_imm(&b, edge_value, 1.0));
             nir_end_primitive(&b, 0);
+
          }
          nir_pop_if(&b, NULL);
       }
