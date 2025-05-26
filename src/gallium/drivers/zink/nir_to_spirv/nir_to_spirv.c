@@ -43,6 +43,11 @@ struct ntv_context {
 
    bool explicit_lod; //whether to set lod=0 for texture()
 
+   bool have_per_vertex_in;
+   bool have_per_vertex_out;
+   SpvId per_vertex_block_type;        // Cache the block type
+   SpvId float_array_8_type;           // Cache the float[8] array type
+
    struct spirv_builder builder;
    nir_shader *nir;
 
@@ -101,6 +106,8 @@ struct ntv_context {
          local_group_size_var, view_index_var,
          base_vertex_var, base_instance_var, draw_id_var;
 
+   SpvId per_vertex_in, per_vertex_out;
+
    SpvId shared_mem_size;
 
    SpvId subgroup_eq_mask_var,
@@ -116,6 +123,19 @@ struct ntv_context {
    SpvId discard_func;
    SpvId float_array_type[2];
 };
+
+#define MAX_CLIP_DISTANCES 8
+#define MAX_CULL_DISTANCES 8
+
+enum per_vertex_member {
+   PV_MEMBER_POSITION = 0,
+   PV_MEMBER_POINT_SIZE = 1,
+   PV_MEMBER_CLIP_DISTANCE = 2,
+   PV_MEMBER_CULL_DISTANCE = 3,
+   PV_MEMBER_COUNT = 4
+};
+
+#define PER_VERTEX_MARKER ((void*)(intptr_t)0xFFFFFFFF)
 
 static SpvId
 get_fvec_constant(struct ntv_context *ctx, unsigned bit_size,
@@ -821,9 +841,123 @@ emit_interpolation(struct ntv_context *ctx, SpvId var_id,
    }
 }
 
+static uint32_t
+builtin_to_per_vertex_member(unsigned location)
+{
+   switch (location) {
+   case VARYING_SLOT_POS:
+      return PV_MEMBER_POSITION;
+   case VARYING_SLOT_PSIZ:
+      return PV_MEMBER_POINT_SIZE;
+   case VARYING_SLOT_CLIP_DIST0:
+      return PV_MEMBER_CLIP_DISTANCE;
+   case VARYING_SLOT_CULL_DIST0:
+      return PV_MEMBER_CULL_DISTANCE;
+   default:
+      unreachable("not a per-vertex builtin");
+   }
+}
+
+static SpvId
+get_per_vertex_member_type(struct ntv_context *ctx, uint32_t member_idx)
+{
+   switch (member_idx) {
+   case PV_MEMBER_POSITION:
+      return get_glsl_type(ctx, glsl_vec4_type(), false);
+   case PV_MEMBER_POINT_SIZE:
+      return get_glsl_type(ctx, glsl_float_type(), false);
+   case PV_MEMBER_CLIP_DISTANCE:
+   case PV_MEMBER_CULL_DISTANCE:
+      // Use cached type or create it once
+      if (ctx->float_array_8_type == 0) {
+         SpvId float_type = get_glsl_type(ctx, glsl_float_type(), false);
+         SpvId array_size = spirv_builder_const_uint(&ctx->builder, 32, 8);
+         ctx->float_array_8_type = spirv_builder_type_array(&ctx->builder, float_type, array_size);
+      }
+      return ctx->float_array_8_type;
+   default:
+      unreachable("invalid per-vertex member");
+   }
+}
+
+static SpvId
+load_per_vertex_member(struct ntv_context *ctx, unsigned builtin_location, bool from_input, SpvId vertex_index)
+{
+   SpvId block_var = from_input ? ctx->per_vertex_in : ctx->per_vertex_out;
+   assert(block_var);
+   uint32_t member_idx = builtin_to_per_vertex_member(builtin_location);
+   SpvId member_type = get_per_vertex_member_type(ctx, member_idx);
+   SpvStorageClass storage = from_input ? SpvStorageClassInput : SpvStorageClassOutput;
+   SpvId ptr_type = spirv_builder_type_pointer(&ctx->builder, storage, member_type);
+
+   // Generate: %ptr = OpAccessChain %member_ptr_type %block_var %member_idx
+   SpvId indices[2];
+   int num_indices = 1;
+
+   if (from_input && (ctx->stage == MESA_SHADER_GEOMETRY || ctx->stage == MESA_SHADER_TESS_EVAL)) {
+      // Access gl_in[vertex_index].member
+      indices[0] = vertex_index;
+      indices[1] = spirv_builder_const_uint(&ctx->builder, 32, member_idx);
+      num_indices = 2;
+   } else {
+      // gl_out.member
+      indices[0] = spirv_builder_const_uint(&ctx->builder, 32, member_idx);
+   }
+
+   SpvId member_ptr = spirv_builder_emit_access_chain(&ctx->builder, ptr_type, block_var,
+                                                      indices, num_indices);
+
+   return spirv_builder_emit_load(&ctx->builder, member_type, member_ptr);
+}
+
+static void
+store_per_vertex_member(struct ntv_context *ctx, unsigned builtin_location, SpvId value)
+{
+   SpvId block_var = ctx->per_vertex_out;
+   assert(block_var != 0);
+
+   uint32_t member_idx = builtin_to_per_vertex_member(builtin_location);
+
+   // Generate: %ptr = OpAccessChain %member_ptr_type %block_var %member_idx
+   SpvId member_type = get_per_vertex_member_type(ctx, member_idx);
+   SpvId ptr_type = spirv_builder_type_pointer(&ctx->builder, SpvStorageClassOutput, member_type);
+
+   SpvId member_idx_const = spirv_builder_const_uint(&ctx->builder, 32, member_idx);
+   SpvId member_ptr = spirv_builder_emit_access_chain(&ctx->builder, ptr_type, block_var,
+                                                     &member_idx_const, 1);
+
+   spirv_builder_emit_store(&ctx->builder, member_ptr, value);
+}
+
+static bool
+is_per_vertex_builtin(unsigned location)
+{
+   switch (location) {
+   case VARYING_SLOT_POS:
+   case VARYING_SLOT_PSIZ:
+   case VARYING_SLOT_CLIP_DIST0:
+   case VARYING_SLOT_CULL_DIST0:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static void
 emit_input(struct ntv_context *ctx, struct nir_variable *var)
 {
+   // Only geometry and tessellation evaluation shaders have per-vertex inputs
+   const bool per_vertex = (ctx->stage == MESA_SHADER_GEOMETRY ||
+                           ctx->stage == MESA_SHADER_TESS_EVAL) &&
+                           is_per_vertex_builtin(var->data.location);
+
+   if (per_vertex) {
+      // For per-vertex inputs, we don't create individual variables
+      // Just store a dummy value in the hash table to indicate this variable exists
+      _mesa_hash_table_insert(ctx->vars, var, PER_VERTEX_MARKER);
+      return;
+   }
+
    SpvId var_id = input_var_init(ctx, var);
    if (ctx->stage == MESA_SHADER_VERTEX)
       spirv_builder_emit_location(&ctx->builder, var_id,
@@ -863,10 +997,6 @@ emit_input(struct ntv_context *ctx, struct nir_variable *var)
          spirv_builder_emit_builtin(&ctx->builder, var_id, SpvBuiltInClipDistance);
          break;
 
-      case VARYING_SLOT_POS:
-      case VARYING_SLOT_PSIZ:
-         break;
-
       default:
          spirv_builder_emit_location(&ctx->builder, var_id,
                                      var->data.driver_location);
@@ -889,6 +1019,17 @@ emit_input(struct ntv_context *ctx, struct nir_variable *var)
 static void
 emit_output(struct ntv_context *ctx, struct nir_variable *var)
 {
+   // All non-fragment stages can have per-vertex outputs
+   const bool per_vertex = ctx->stage != MESA_SHADER_FRAGMENT &&
+                           is_per_vertex_builtin(var->data.location);
+
+   if (per_vertex) {
+      // For per-vertex outputs, we don't create individual variables
+      // Just store a dummy value in the hash table to indicate this variable exists
+      _mesa_hash_table_insert(ctx->vars, var, PER_VERTEX_MARKER);
+      return;
+   }
+
    SpvId var_type = get_glsl_type(ctx, var->type, false);
 
    /* SampleMask is always an array in spirv */
@@ -909,20 +1050,15 @@ emit_output(struct ntv_context *ctx, struct nir_variable *var)
 
    if (ctx->stage != MESA_SHADER_FRAGMENT) {
       switch (var->data.location) {
-      // HANDLE_EMIT_BUILTIN(POS, Position);
-      // HANDLE_EMIT_BUILTIN(PSIZ, PointSize);
+      HANDLE_EMIT_BUILTIN(POS, Position);
+      HANDLE_EMIT_BUILTIN(PSIZ, PointSize);
       HANDLE_EMIT_BUILTIN(LAYER, Layer);
       HANDLE_EMIT_BUILTIN(PRIMITIVE_ID, PrimitiveId);
       HANDLE_EMIT_BUILTIN(CLIP_DIST0, ClipDistance);
-      // HANDLE_EMIT_BUILTIN(CULL_DIST0, CullDistance);
+      HANDLE_EMIT_BUILTIN(CULL_DIST0, CullDistance);
       HANDLE_EMIT_BUILTIN(VIEWPORT, ViewportIndex);
       HANDLE_EMIT_BUILTIN(TESS_LEVEL_OUTER, TessLevelOuter);
       HANDLE_EMIT_BUILTIN(TESS_LEVEL_INNER, TessLevelInner);
-
-      case VARYING_SLOT_POS:
-      case VARYING_SLOT_PSIZ:
-      case VARYING_SLOT_CULL_DIST0:
-         break;
 
       default:
          /* non-xfb psiz output will have location -1 */
@@ -1462,9 +1598,77 @@ init_reg(struct ntv_context *ctx, nir_intrinsic_instr *decl, nir_alu_type atype)
    ctx->def_types[index] = nir_alu_type_get_base_type(atype);
 }
 
+// Add this function to check if a deref chain leads to a per-vertex variable
+static bool
+is_per_vertex_deref_chain(nir_deref_instr *deref)
+{
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   if (!var)
+      return false;
+
+   return var && is_per_vertex_builtin(var->data.location);
+}
+
+// Modify get_src to handle per-vertex variables (add this check at the beginning of get_src)
 static SpvId
 get_src(struct ntv_context *ctx, nir_src *src, nir_alu_type *atype)
 {
+   // Check if this is a deref that leads to a per-vertex variable
+   if (src->ssa && src->ssa->parent_instr->type == nir_instr_type_deref) {
+      nir_deref_instr *deref = nir_instr_as_deref(src->ssa->parent_instr);
+      nir_variable *var = nir_deref_instr_get_variable(deref);
+
+      if (var && is_per_vertex_builtin(var->data.location)) {
+
+         // Check if this variable is marked as per-vertex in our hash table
+         struct hash_entry *entry = _mesa_hash_table_search(ctx->vars, var);
+         if (entry && entry->data == PER_VERTEX_MARKER) {
+
+            // Handle per-vertex variable access here too
+            if (var->data.mode == nir_var_shader_in &&
+                (ctx->stage == MESA_SHADER_GEOMETRY || ctx->stage == MESA_SHADER_TESS_EVAL)) {
+
+               // For per-vertex inputs, variable derefs should return the block variable itself
+               // Only array derefs should generate access chains
+               if (deref->deref_type == nir_deref_type_var) {
+                  // Return the per-vertex input block variable
+                  SpvId result = ctx->per_vertex_in;
+                  return result;
+               } else if (deref->deref_type == nir_deref_type_array) {
+                  SpvId vertex_index = spirv_builder_const_uint(&ctx->builder, 32, 0);
+
+                  // Walk the deref chain to find array indexing
+                  for (nir_deref_instr *p = deref; p; p = nir_deref_instr_parent(p)) {
+                     if (p->deref_type == nir_deref_type_array) {
+                        if (nir_src_is_const(p->arr.index)) {
+                           uint64_t const_index = nir_src_as_uint(p->arr.index);
+                           vertex_index = spirv_builder_const_uint(&ctx->builder, 32, const_index);
+                        } else if (p->arr.index.ssa) {
+                           vertex_index = get_src(ctx, &p->arr.index, NULL);
+                        }
+                        break;
+                     }
+                  }
+
+                  // This is an array deref like &in_slot_0[0] - return the POINTER to the member
+                  SpvId block_var = ctx->per_vertex_in;
+                  uint32_t member_idx = builtin_to_per_vertex_member(var->data.location);
+                  SpvId member_type = get_per_vertex_member_type(ctx, member_idx);
+                  SpvStorageClass storage = SpvStorageClassInput;
+                  SpvId ptr_type = spirv_builder_type_pointer(&ctx->builder, storage, member_type);
+
+                  SpvId indices[2] = {vertex_index, spirv_builder_const_uint(&ctx->builder, 32, member_idx)};
+                  SpvId result = spirv_builder_emit_access_chain(&ctx->builder, ptr_type, block_var, indices, 2);
+                  return result;
+               }
+            }
+
+            // TODO: unreachable("ERROR: Unhandled per-vertex variable case in get_src");
+            return spirv_builder_const_uint(&ctx->builder, 32, 0);
+         }
+      }
+   }
+
    return get_src_ssa(ctx, src->ssa, atype);
 }
 
@@ -2273,11 +2477,48 @@ emit_discard(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 static void
 emit_load_deref(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 {
+   nir_variable *var = nir_intrinsic_get_var(intr, 0);
    nir_alu_type atype;
    SpvId ptr = get_src(ctx, intr->src, &atype);
 
    nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
    SpvId type;
+
+   // Check if this is a per-vertex variable by looking it up in the hash table
+   struct hash_entry *entry = _mesa_hash_table_search(ctx->vars, var);
+
+   if (entry && entry->data == PER_VERTEX_MARKER &&
+       var->data.mode == nir_var_shader_in &&
+       ctx->stage != MESA_SHADER_FRAGMENT &&
+       ctx->stage != MESA_SHADER_VERTEX &&
+       is_per_vertex_builtin(var->data.location)) {
+
+      SpvId vertex_index = spirv_builder_const_uint(&ctx->builder, 32, 0);
+
+      nir_deref_instr *deref = nir_src_as_deref(intr->src[0]);
+
+      // Walk the deref chain to find array indexing
+      for (nir_deref_instr *p = deref; p; p = nir_deref_instr_parent(p)) {
+         if (p->deref_type == nir_deref_type_array) {
+            if (nir_src_is_const(p->arr.index)) {
+               // Constant array index
+               uint64_t const_index = nir_src_as_uint(p->arr.index);
+               vertex_index = spirv_builder_const_uint(&ctx->builder, 32, const_index);
+            } else if (p->arr.index.ssa) {
+               // SSA array index
+               vertex_index = get_src(ctx, &p->arr.index, NULL);
+            } else {
+               vertex_index = spirv_builder_const_uint(&ctx->builder, 32, 0);
+            }
+            break;
+         }
+      }
+
+      SpvId result = load_per_vertex_member(ctx, var->data.location, true, vertex_index);
+      store_def(ctx, intr->def.index, result, nir_type_float);
+      return;
+   }
+
    if (glsl_type_is_image(deref->type)) {
       nir_variable *var = nir_deref_instr_get_variable(deref);
       const struct glsl_type *gtype = glsl_without_array(var->type);
@@ -2309,6 +2550,24 @@ emit_store_deref(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    nir_variable *var = nir_intrinsic_get_var(intr, 0);
    SpvId type = get_glsl_type(ctx, gtype, var->data.mode & (nir_var_shader_temp | nir_var_function_temp));
    unsigned wrmask = nir_intrinsic_write_mask(intr);
+
+   // Check if this is a per-vertex built-in store
+   if (var->data.mode == nir_var_shader_out &&
+       ctx->stage != MESA_SHADER_FRAGMENT &&
+       is_per_vertex_builtin(var->data.location)) {
+
+      // Convert source to the right type if needed
+      SpvId result;
+      if (ptype == stype)
+         result = src;
+      else
+         result = emit_bitcast(ctx, type, src);
+
+      // Store directly to the per-vertex block
+      store_per_vertex_member(ctx, var->data.location, result);
+      return;
+   }
+
    if (!glsl_type_is_scalar(gtype) &&
        wrmask != BITFIELD_MASK(glsl_type_is_array(gtype) ? glsl_get_aoa_size(gtype) : glsl_get_vector_elements(gtype))) {
       /* no idea what we do if this fails */
@@ -4636,6 +4895,91 @@ get_spacing(enum gl_tess_spacing spacing)
    }
 }
 
+static SpvId
+create_per_vertex_block_type(struct ntv_context *ctx)
+{
+   if (ctx->per_vertex_block_type != 0)
+      return ctx->per_vertex_block_type;
+
+   SpvId vec4_type = get_glsl_type(ctx, glsl_vec4_type(), false);
+   SpvId float_type = get_glsl_type(ctx, glsl_float_type(), false);
+   SpvId float_array_type = get_per_vertex_member_type(ctx, PV_MEMBER_CLIP_DISTANCE);
+
+   // Build the struct with all 4 members
+   SpvId member_types[PV_MEMBER_COUNT] = {
+      [PV_MEMBER_POSITION] = vec4_type,
+      [PV_MEMBER_POINT_SIZE] = float_type,
+      [PV_MEMBER_CLIP_DISTANCE] = float_array_type,
+      [PV_MEMBER_CULL_DISTANCE] = float_array_type  // Same type as clip distance
+   };
+
+   SpvId block_type = spirv_builder_type_struct(&ctx->builder, member_types, PV_MEMBER_COUNT);
+
+   // Apply built-in decorations to all members
+   spirv_builder_emit_member_builtin(&ctx->builder, block_type, PV_MEMBER_POSITION,
+                                     SpvBuiltInPosition);
+   spirv_builder_emit_member_name(&ctx->builder, block_type, PV_MEMBER_POSITION, "gl_Position");
+
+   spirv_builder_emit_member_builtin(&ctx->builder, block_type, PV_MEMBER_POINT_SIZE,
+                                     SpvBuiltInPointSize);
+   spirv_builder_emit_member_name(&ctx->builder, block_type, PV_MEMBER_POINT_SIZE, "gl_PointSize");
+
+   spirv_builder_emit_member_builtin(&ctx->builder, block_type, PV_MEMBER_CLIP_DISTANCE,
+                                     SpvBuiltInClipDistance);
+   spirv_builder_emit_member_name(&ctx->builder, block_type, PV_MEMBER_CLIP_DISTANCE, "gl_ClipDistance");
+
+   spirv_builder_emit_member_builtin(&ctx->builder, block_type, PV_MEMBER_CULL_DISTANCE,
+                                     SpvBuiltInCullDistance);
+   spirv_builder_emit_member_name(&ctx->builder, block_type, PV_MEMBER_CULL_DISTANCE, "gl_CullDistance");
+
+   // Block decoration
+   spirv_builder_emit_decoration(&ctx->builder, block_type, SpvDecorationBlock);
+   spirv_builder_emit_name(&ctx->builder, block_type, "gl_PerVertex");
+
+   // Cache the block type
+   ctx->per_vertex_block_type = block_type;
+
+   return block_type;
+}
+
+static void
+setup_per_vertex_blocks(struct ntv_context *ctx, uint8_t vertices_in)
+{
+   SpvId block_type = create_per_vertex_block_type(ctx);
+
+   // Create input block if this stage needs it
+   if (ctx->have_per_vertex_in) {
+      SpvId input_type = block_type;
+      SpvId ptr_type;
+
+      if (ctx->stage == MESA_SHADER_GEOMETRY ||
+          ctx->stage == MESA_SHADER_TESS_EVAL) {
+         // gl_in[]: array of gl_PerVertex
+         SpvId array_size = spirv_builder_const_uint(&ctx->builder, 32, vertices_in);
+         input_type = spirv_builder_type_array(&ctx->builder, block_type, array_size);
+      }
+
+      ptr_type = spirv_builder_type_pointer(&ctx->builder, SpvStorageClassInput, input_type);
+      SpvId var_id = spirv_builder_emit_var(&ctx->builder, ptr_type, SpvStorageClassInput);
+      spirv_builder_emit_name(&ctx->builder, var_id, "gl_in");
+      ctx->per_vertex_in = var_id;
+
+      // Add to entry point interface
+      ctx->entry_ifaces[ctx->num_entry_ifaces++] = var_id;
+   }
+
+   // Create output block if this stage needs it
+   if (ctx->have_per_vertex_out) {
+      SpvId ptr_type = spirv_builder_type_pointer(&ctx->builder, SpvStorageClassOutput, block_type);
+      SpvId var_id = spirv_builder_emit_var(&ctx->builder, ptr_type, SpvStorageClassOutput);
+      spirv_builder_emit_name(&ctx->builder, var_id, "gl_out");
+      ctx->per_vertex_out = var_id;
+
+      // Add to entry point interface
+      ctx->entry_ifaces[ctx->num_entry_ifaces++] = var_id;
+   }
+}
+
 struct spirv_shader *
 nir_to_spirv(struct nir_shader *s, const struct zink_shader_info *sinfo, const struct zink_screen *screen)
 {
@@ -4649,6 +4993,8 @@ nir_to_spirv(struct nir_shader *s, const struct zink_shader_info *sinfo, const s
    assert(spirv_version >= SPIRV_VERSION(1, 0));
    ctx.spirv_1_4_interfaces = spirv_version >= SPIRV_VERSION(1, 4);
    ctx.have_spirv16 = spirv_version >= SPIRV_VERSION(1, 6);
+   ctx.have_per_vertex_in = sinfo->have_per_vertex_in;
+   ctx.have_per_vertex_out = sinfo->have_per_vertex_out;
 
    ctx.bindless_set_idx = sinfo->bindless_set_idx;
    ctx.glsl_types[0] = _mesa_pointer_hash_table_create(ctx.mem_ctx);
@@ -4812,6 +5158,9 @@ nir_to_spirv(struct nir_shader *s, const struct zink_shader_info *sinfo, const s
 
    ctx.vars = _mesa_hash_table_create(ctx.mem_ctx, _mesa_hash_pointer,
                                       _mesa_key_pointer_equal);
+
+   if (ctx.have_per_vertex_in || ctx.have_per_vertex_out)
+      setup_per_vertex_blocks(&ctx, s->info.gs.vertices_in);
 
    nir_foreach_variable_with_modes(var, s, nir_var_mem_push_const)
       input_var_init(&ctx, var);

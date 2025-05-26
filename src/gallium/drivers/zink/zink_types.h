@@ -764,6 +764,8 @@ struct zink_shader_info {
       bool denorms_all_independence:1;
    } float_controls;
    unsigned bindless_set_idx;
+   bool have_per_vertex_in;
+   bool have_per_vertex_out;
 };
 
 enum zink_rast_prim {
@@ -845,6 +847,8 @@ struct zink_shader {
          nir_variable *fbfetch; //for fs output
       } fs;
    };
+
+   bool has_per_vertex_block; // uses gl_PerVertex block
 };
 
 

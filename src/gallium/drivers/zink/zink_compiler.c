@@ -3932,12 +3932,31 @@ remove_interpolate_at_sample(struct nir_builder *b, nir_intrinsic_instr *interp,
    return true;
 }
 
+static inline bool
+stage_has_per_vertex_output(gl_shader_stage stage)
+{
+   return stage == MESA_SHADER_VERTEX ||
+          stage == MESA_SHADER_TESS_EVAL ||
+          stage == MESA_SHADER_GEOMETRY;
+}
+
+static inline bool
+stage_has_per_vertex_input(gl_shader_stage stage)
+{
+   return stage == MESA_SHADER_TESS_CTRL ||
+          stage == MESA_SHADER_TESS_EVAL ||
+          stage == MESA_SHADER_GEOMETRY;
+}
+
 struct zink_shader_object
 zink_shader_compile(struct zink_screen *screen, bool can_shobj, struct zink_shader *zs,
                     nir_shader *nir, const struct zink_shader_key *key, const void *extra_data, struct zink_program *pg)
 {
    bool need_optimize = true;
    bool inlined_uniforms = false;
+
+   zs->has_per_vertex_block = stage_has_per_vertex_input(nir->info.stage) ||
+                             stage_has_per_vertex_output(nir->info.stage);
 
    NIR_PASS_V(nir, add_derefs);
    NIR_PASS_V(nir, nir_lower_fragcolor, nir->info.fs.color_is_dual_source ? 1 : 8);
@@ -6137,7 +6156,8 @@ zink_shader_create(struct zink_screen *screen, struct nir_shader *nir)
 
    zs->has_edgeflags = nir->info.stage == MESA_SHADER_VERTEX &&
                        nir->info.outputs_written & VARYING_BIT_EDGE;
-
+   zs->sinfo.have_per_vertex_in = stage_has_per_vertex_input(nir->info.stage);
+   zs->sinfo.have_per_vertex_out = stage_has_per_vertex_output(nir->info.stage);
    zs->sinfo.have_vulkan_memory_model = screen->info.have_KHR_vulkan_memory_model;
    zs->sinfo.have_workgroup_memory_explicit_layout = screen->info.have_KHR_workgroup_memory_explicit_layout;
    zs->sinfo.broken_arbitary_type_const = screen->driver_compiler_workarounds.broken_const;
