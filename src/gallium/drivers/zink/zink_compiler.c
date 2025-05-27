@@ -3936,6 +3936,7 @@ static inline bool
 stage_has_per_vertex_output(gl_shader_stage stage)
 {
    return stage == MESA_SHADER_VERTEX ||
+          stage == MESA_SHADER_TESS_CTRL ||
           stage == MESA_SHADER_TESS_EVAL ||
           stage == MESA_SHADER_GEOMETRY;
 }

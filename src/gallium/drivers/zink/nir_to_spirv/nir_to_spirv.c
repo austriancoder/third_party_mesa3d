@@ -917,16 +917,38 @@ store_per_vertex_member(struct ntv_context *ctx, unsigned builtin_location, SpvI
    assert(block_var != 0);
 
    uint32_t member_idx = builtin_to_per_vertex_member(builtin_location);
-
-   // Generate: %ptr = OpAccessChain %member_ptr_type %block_var %member_idx
    SpvId member_type = get_per_vertex_member_type(ctx, member_idx);
    SpvId ptr_type = spirv_builder_type_pointer(&ctx->builder, SpvStorageClassOutput, member_type);
 
-   SpvId member_idx_const = spirv_builder_const_uint(&ctx->builder, 32, member_idx);
-   SpvId member_ptr = spirv_builder_emit_access_chain(&ctx->builder, ptr_type, block_var,
-                                                     &member_idx_const, 1);
+   // Check if this stage has per-vertex output arrays (tessellation control)
+   if (ctx->stage == MESA_SHADER_TESS_CTRL) {
+      // For tessellation control: gl_out[gl_InvocationId].member
+      // We need to get the current invocation ID
+      SpvId invocation_id;
 
-   spirv_builder_emit_store(&ctx->builder, member_ptr, value);
+      // Look up gl_InvocationId variable
+      // This is a built-in variable that should be available
+      if (ctx->invocation_id_var) {
+         invocation_id = spirv_builder_emit_load(&ctx->builder,
+                                               spirv_builder_type_uint(&ctx->builder, 32),
+                                               ctx->invocation_id_var);
+      } else {
+         // Fallback to 0 if gl_InvocationId isn't available
+         fprintf(stderr, "Warning: gl_InvocationId not available, using 0\n");
+         invocation_id = spirv_builder_const_uint(&ctx->builder, 32, 0);
+      }
+
+      SpvId indices[2] = {invocation_id, spirv_builder_const_uint(&ctx->builder, 32, member_idx)};
+      SpvId member_ptr = spirv_builder_emit_access_chain(&ctx->builder, ptr_type, block_var,
+                                                        indices, 2);
+      spirv_builder_emit_store(&ctx->builder, member_ptr, value);
+   } else {
+      // For other stages: gl_out.member (single block, not array)
+      SpvId member_idx_const = spirv_builder_const_uint(&ctx->builder, 32, member_idx);
+      SpvId member_ptr = spirv_builder_emit_access_chain(&ctx->builder, ptr_type, block_var,
+                                                        &member_idx_const, 1);
+      spirv_builder_emit_store(&ctx->builder, member_ptr, value);
+   }
 }
 
 static bool
@@ -1609,6 +1631,23 @@ is_per_vertex_deref_chain(nir_deref_instr *deref)
    return var && is_per_vertex_builtin(var->data.location);
 }
 
+static inline bool
+stage_has_per_vertex_output(gl_shader_stage stage)
+{
+   return stage == MESA_SHADER_VERTEX ||
+          stage == MESA_SHADER_TESS_CTRL ||
+          stage == MESA_SHADER_TESS_EVAL ||
+          stage == MESA_SHADER_GEOMETRY;
+}
+
+static inline bool
+stage_has_per_vertex_input(gl_shader_stage stage)
+{
+   return stage == MESA_SHADER_TESS_CTRL ||
+          stage == MESA_SHADER_TESS_EVAL ||
+          stage == MESA_SHADER_GEOMETRY;
+}
+
 // Modify get_src to handle per-vertex variables (add this check at the beginning of get_src)
 static SpvId
 get_src(struct ntv_context *ctx, nir_src *src, nir_alu_type *atype)
@@ -1617,26 +1656,21 @@ get_src(struct ntv_context *ctx, nir_src *src, nir_alu_type *atype)
    if (src->ssa && src->ssa->parent_instr->type == nir_instr_type_deref) {
       nir_deref_instr *deref = nir_instr_as_deref(src->ssa->parent_instr);
       nir_variable *var = nir_deref_instr_get_variable(deref);
-
       if (var && is_per_vertex_builtin(var->data.location)) {
-
          // Check if this variable is marked as per-vertex in our hash table
          struct hash_entry *entry = _mesa_hash_table_search(ctx->vars, var);
          if (entry && entry->data == PER_VERTEX_MARKER) {
 
-            // Handle per-vertex variable access here too
+            // Handle per-vertex INPUTS
             if (var->data.mode == nir_var_shader_in &&
-                (ctx->stage == MESA_SHADER_GEOMETRY || ctx->stage == MESA_SHADER_TESS_EVAL)) {
-
+                stage_has_per_vertex_input(ctx->stage)) {
                // For per-vertex inputs, variable derefs should return the block variable itself
                // Only array derefs should generate access chains
                if (deref->deref_type == nir_deref_type_var) {
                   // Return the per-vertex input block variable
-                  SpvId result = ctx->per_vertex_in;
-                  return result;
+                  return ctx->per_vertex_in;
                } else if (deref->deref_type == nir_deref_type_array) {
                   SpvId vertex_index = spirv_builder_const_uint(&ctx->builder, 32, 0);
-
                   // Walk the deref chain to find array indexing
                   for (nir_deref_instr *p = deref; p; p = nir_deref_instr_parent(p)) {
                      if (p->deref_type == nir_deref_type_array) {
@@ -1644,22 +1678,52 @@ get_src(struct ntv_context *ctx, nir_src *src, nir_alu_type *atype)
                            uint64_t const_index = nir_src_as_uint(p->arr.index);
                            vertex_index = spirv_builder_const_uint(&ctx->builder, 32, const_index);
                         } else if (p->arr.index.ssa) {
-                           vertex_index = get_src(ctx, &p->arr.index, NULL);
+                           vertex_index = get_src_ssa(ctx, p->arr.index.ssa, NULL);
                         }
                         break;
                      }
                   }
-
                   // This is an array deref like &in_slot_0[0] - return the POINTER to the member
                   SpvId block_var = ctx->per_vertex_in;
                   uint32_t member_idx = builtin_to_per_vertex_member(var->data.location);
                   SpvId member_type = get_per_vertex_member_type(ctx, member_idx);
                   SpvStorageClass storage = SpvStorageClassInput;
                   SpvId ptr_type = spirv_builder_type_pointer(&ctx->builder, storage, member_type);
-
                   SpvId indices[2] = {vertex_index, spirv_builder_const_uint(&ctx->builder, 32, member_idx)};
-                  SpvId result = spirv_builder_emit_access_chain(&ctx->builder, ptr_type, block_var, indices, 2);
-                  return result;
+                  return spirv_builder_emit_access_chain(&ctx->builder, ptr_type, block_var, indices, 2);
+               }
+            }
+
+            // Handle per-vertex OUTPUTS
+            if (var->data.mode == nir_var_shader_out &&
+                stage_has_per_vertex_output(ctx->stage)) {
+               // For per-vertex outputs, variable derefs should return the block variable itself
+               if (deref->deref_type == nir_deref_type_var) {
+                  // Return the per-vertex output block variable
+                  return ctx->per_vertex_out;
+               } else if (deref->deref_type == nir_deref_type_array) {
+                  // For tessellation control, outputs can also be arrays
+                  SpvId vertex_index = spirv_builder_const_uint(&ctx->builder, 32, 0);
+                  // Walk the deref chain to find array indexing
+                  for (nir_deref_instr *p = deref; p; p = nir_deref_instr_parent(p)) {
+                     if (p->deref_type == nir_deref_type_array) {
+                        if (nir_src_is_const(p->arr.index)) {
+                           uint64_t const_index = nir_src_as_uint(p->arr.index);
+                           vertex_index = spirv_builder_const_uint(&ctx->builder, 32, const_index);
+                        } else if (p->arr.index.ssa) {
+                           vertex_index = get_src_ssa(ctx, p->arr.index.ssa, NULL);
+                        }
+                        break;
+                     }
+                  }
+                  // This is an array deref like &out_slot_0[invocation] - return the POINTER to the member
+                  SpvId block_var = ctx->per_vertex_out;
+                  uint32_t member_idx = builtin_to_per_vertex_member(var->data.location);
+                  SpvId member_type = get_per_vertex_member_type(ctx, member_idx);
+                  SpvStorageClass storage = SpvStorageClassOutput;
+                  SpvId ptr_type = spirv_builder_type_pointer(&ctx->builder, storage, member_type);
+                  SpvId indices[2] = {vertex_index, spirv_builder_const_uint(&ctx->builder, 32, member_idx)};
+                  return spirv_builder_emit_access_chain(&ctx->builder, ptr_type, block_var, indices, 2);
                }
             }
 
@@ -2542,14 +2606,39 @@ emit_load_deref(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 static void
 emit_store_deref(struct ntv_context *ctx, nir_intrinsic_instr *intr)
 {
+   nir_variable *var = nir_intrinsic_get_var(intr, 0);
+   unsigned wrmask = nir_intrinsic_write_mask(intr);
+
+   // Check if this is a per-vertex built-in store FIRST, before calling get_src
+   if (var->data.mode == nir_var_shader_out &&
+       stage_has_per_vertex_output(ctx->stage) &&
+       is_per_vertex_builtin(var->data.location)) {
+
+      // Only get the source value, not the destination pointer
+      nir_alu_type stype;
+      SpvId src = get_src(ctx, &intr->src[1], &stype);
+
+      const struct glsl_type *gtype = nir_src_as_deref(intr->src[0])->type;
+      SpvId type = get_glsl_type(ctx, gtype, false);
+
+      // Convert source to the right type if needed
+      SpvId result;
+      if (stype == nir_get_nir_type_for_glsl_base_type(glsl_get_base_type(gtype)))
+         result = src;
+      else
+         result = emit_bitcast(ctx, type, src);
+
+      // Store directly to the per-vertex block
+      store_per_vertex_member(ctx, var->data.location, result);
+      return;
+   }
+
    nir_alu_type ptype, stype;
    SpvId ptr = get_src(ctx, &intr->src[0], &ptype);
    SpvId src = get_src(ctx, &intr->src[1], &stype);
 
    const struct glsl_type *gtype = nir_src_as_deref(intr->src[0])->type;
-   nir_variable *var = nir_intrinsic_get_var(intr, 0);
-   SpvId type = get_glsl_type(ctx, gtype, var->data.mode & (nir_var_shader_temp | nir_var_function_temp));
-   unsigned wrmask = nir_intrinsic_write_mask(intr);
+   SpvId type = get_glsl_type(ctx, gtype, false);
 
    // Check if this is a per-vertex built-in store
    if (var->data.mode == nir_var_shader_out &&
@@ -4953,6 +5042,7 @@ setup_per_vertex_blocks(struct ntv_context *ctx, uint8_t vertices_in)
       SpvId ptr_type;
 
       if (ctx->stage == MESA_SHADER_GEOMETRY ||
+          ctx->stage == MESA_SHADER_TESS_CTRL ||
           ctx->stage == MESA_SHADER_TESS_EVAL) {
          // gl_in[]: array of gl_PerVertex
          SpvId array_size = spirv_builder_const_uint(&ctx->builder, 32, vertices_in);
@@ -4970,7 +5060,17 @@ setup_per_vertex_blocks(struct ntv_context *ctx, uint8_t vertices_in)
 
    // Create output block if this stage needs it
    if (ctx->have_per_vertex_out) {
-      SpvId ptr_type = spirv_builder_type_pointer(&ctx->builder, SpvStorageClassOutput, block_type);
+      SpvId output_type = block_type;
+
+      // Tessellation control shaders need gl_out[] as an array
+      if (ctx->stage == MESA_SHADER_TESS_CTRL) {
+         // Get output vertices from shader info
+         uint32_t output_vertices = ctx->nir->info.tess.tcs_vertices_out;
+         SpvId array_size = spirv_builder_const_uint(&ctx->builder, 32, output_vertices);
+         output_type = spirv_builder_type_array(&ctx->builder, block_type, array_size);
+      }
+
+      SpvId ptr_type = spirv_builder_type_pointer(&ctx->builder, SpvStorageClassOutput, output_type);
       SpvId var_id = spirv_builder_emit_var(&ctx->builder, ptr_type, SpvStorageClassOutput);
       spirv_builder_emit_name(&ctx->builder, var_id, "gl_out");
       ctx->per_vertex_out = var_id;
