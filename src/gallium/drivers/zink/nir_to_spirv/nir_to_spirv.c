@@ -894,7 +894,10 @@ load_per_vertex_member(struct ntv_context *ctx, unsigned builtin_location, bool 
    SpvId indices[2];
    int num_indices = 1;
 
-   if (from_input && (ctx->stage == MESA_SHADER_GEOMETRY || ctx->stage == MESA_SHADER_TESS_EVAL)) {
+   if (from_input &&
+       (ctx->stage == MESA_SHADER_GEOMETRY ||
+        ctx->stage == MESA_SHADER_TESS_CTRL ||
+        ctx->stage == MESA_SHADER_TESS_EVAL)) {
       // Access gl_in[vertex_index].member
       indices[0] = vertex_index;
       indices[1] = spirv_builder_const_uint(&ctx->builder, 32, member_idx);
