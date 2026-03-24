@@ -9,7 +9,7 @@
 #include "egl_dri2.h"
 #include "kopper_interface.h"
 
-#include "native_buffer.h"
+#include "display_type.h"
 #include "external_window.h"
 
 static _EGLSurface *
@@ -207,6 +207,7 @@ static const __DRIextension *image_loader_extensions[] = {
    &kopper_loader_extension.base,
    &swrast_loader_extension.base,
    &dri2_loader_extension.base,
+   &use_invalidate.base,
    NULL,
 };
 
@@ -240,20 +241,20 @@ ohos_add_configs_for_visuals(_EGLDisplay *disp)
       int hal_format;
       enum pipe_format pipe_format;
    } visuals[] = {
-      {NATIVEBUFFER_PIXEL_FMT_RGBA_8888, PIPE_FORMAT_RGBA8888_UNORM},
-      {NATIVEBUFFER_PIXEL_FMT_RGBX_8888, PIPE_FORMAT_BGRX8888_UNORM},
-      {NATIVEBUFFER_PIXEL_FMT_RGB_565, PIPE_FORMAT_B5G6R5_UNORM},
+      {PIXEL_FMT_RGBA_8888, PIPE_FORMAT_RGBA8888_UNORM},
+      {PIXEL_FMT_RGBX_8888, PIPE_FORMAT_BGRX8888_UNORM},
+      {PIXEL_FMT_RGB_565, PIPE_FORMAT_B5G6R5_UNORM},
       /* This must be after HAL_PIXEL_FMT_RGBA_8888, we only keep BGRA
        * visual if it turns out RGBA visual is not available.
        */
-      {NATIVEBUFFER_PIXEL_FMT_BGRA_8888, PIPE_FORMAT_BGRA8888_UNORM},
+      {PIXEL_FMT_BGRA_8888, PIPE_FORMAT_BGRA8888_UNORM},
    };
 
    unsigned int format_count[ARRAY_SIZE(visuals)] = {0};
 
    bool has_rgba = false;
    for (int i = 0; i < ARRAY_SIZE(visuals); i++) {
-      if (visuals[i].hal_format == NATIVEBUFFER_PIXEL_FMT_BGRA_8888 && has_rgba)
+      if (visuals[i].hal_format == PIXEL_FMT_BGRA_8888 && has_rgba)
          continue;
       for (int j = 0; dri2_dpy->driver_configs[j]; j++) {
          const struct gl_config *gl_config =
@@ -280,7 +281,7 @@ ohos_add_configs_for_visuals(_EGLDisplay *disp)
             format_count[i]++;
       }
 
-      if (visuals[i].hal_format == NATIVEBUFFER_PIXEL_FMT_RGBA_8888 && format_count[i])
+      if (visuals[i].hal_format == PIXEL_FMT_RGBA_8888 && format_count[i])
          has_rgba = true;
    }
 
