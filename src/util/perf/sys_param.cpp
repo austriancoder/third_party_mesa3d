@@ -16,4 +16,5 @@
  #include "sys_param.h"
  #include "syspara/param_wrapper.h"
 
-bool open_mesa3d_trace = OHOS::system::GetIntParameter("persist.sys.graphic.openMesa3dTrace", 0) != 0;
+bool open_mesa3d_trace = false;
+//bool open_mesa3d_trace = OHOS::system::GetIntParameter("persist.sys.graphic.openMesa3dTrace", 0) != 0;
