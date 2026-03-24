@@ -249,17 +249,17 @@ endif
 
 if with_platform_ohos
   deps_for_libmesa_util += dependency('libhilog')
-  deps_for_libmesa_util += dependency('libhitrace')
-  deps_for_libmesa_util += dependency('libbegetutil')
-  deps_for_libmesa_util += dependency('libqos')
+  # deps_for_libmesa_util += dependency('libhitrace')
+  # deps_for_libmesa_util += dependency('libbegetutil')
+  # deps_for_libmesa_util += dependency('libqos')
 endif
 
-if with_platform_ohos
-  files_mesa_util += files(
-    'perf/sys_param.cpp',
-    'perf/sys_param.h',
-  )
-endif
+# if with_platform_ohos
+#   files_mesa_util += files(
+#     'perf/sys_param.cpp',
+#     'perf/sys_param.h',
+#   )
+# endif
 
 if with_perfetto
   files_mesa_util += files(

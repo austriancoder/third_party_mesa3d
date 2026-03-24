@@ -40,6 +40,7 @@
 #include <sys/syscall.h>
 #endif
 
+#undef DETECT_OS_OHOS
 #if DETECT_OS_OHOS
 #include <qos.h>
 #endif

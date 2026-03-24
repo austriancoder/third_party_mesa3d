@@ -12,6 +12,8 @@
 #include "util/detect_os.h"
 #include "util/macros.h"
 
+#undef DETECT_OS_OHOS
+
 #if defined(HAVE_PERFETTO)
 
 /* note that util_perfetto_is_tracing_enabled always returns false util
