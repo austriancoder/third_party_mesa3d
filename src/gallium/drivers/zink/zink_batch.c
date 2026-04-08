@@ -9,6 +9,8 @@
 #include "zink_screen.h"
 #include "zink_surface.h"
 
+#include "util/perf/cpu_trace.h"
+
 #ifdef VK_USE_PLATFORM_METAL_EXT
 #include "QuartzCore/CAMetalLayer.h"
 #endif
@@ -86,6 +88,15 @@ zink_reset_batch_state(struct zink_context *ctx, struct zink_batch_state *bs)
 {
    struct zink_screen *screen = zink_screen(ctx->base.screen);
 
+   /* free cmdbufs left over from rpflush sub-batch submits before the pool
+    * reset, otherwise they'd accumulate forever (cmdpool reset doesn't free)
+    */
+   if (util_dynarray_num_elements(&bs->sub_batch_cmdbufs, VkCommandBuffer)) {
+      VKSCR(FreeCommandBuffers)(screen->dev, bs->cmdpool,
+                                util_dynarray_num_elements(&bs->sub_batch_cmdbufs, VkCommandBuffer),
+                                bs->sub_batch_cmdbufs.data);
+      util_dynarray_clear(&bs->sub_batch_cmdbufs);
+   }
    VkResult result = VKSCR(ResetCommandPool)(screen->dev, bs->cmdpool, 0);
    if (result != VK_SUCCESS)
       mesa_loge("ZINK: vkResetCommandPool failed (%s)", vk_Result_to_str(result));
@@ -300,6 +311,7 @@ zink_batch_state_destroy(struct zink_screen *screen, struct zink_batch_state *bs
    util_dynarray_fini(&bs->freed_sparse_backing_bos);
    util_dynarray_fini(&bs->dead_querypools);
    util_dynarray_fini(&bs->swapchain_obj);
+   util_dynarray_fini(&bs->sub_batch_cmdbufs);
    util_dynarray_fini(&bs->zombie_samplers);
    util_dynarray_fini(&bs->unref_resources);
    util_dynarray_fini(&bs->bindless_releases[0]);
@@ -404,6 +416,7 @@ create_batch_state(struct zink_context *ctx)
    util_dynarray_init(&bs->bindless_releases[0], NULL);
    util_dynarray_init(&bs->bindless_releases[1], NULL);
    util_dynarray_init(&bs->swapchain_obj, NULL);
+   util_dynarray_init(&bs->sub_batch_cmdbufs, NULL);
    util_dynarray_init(&bs->fence.mfences, NULL);
 
    cnd_init(&bs->usage.flush);
@@ -512,6 +525,17 @@ zink_batch_bind_db(struct zink_context *ctx)
    bs->dd.db_bound = true;
 }
 
+/* zero-init dynamic state on a fresh cmdbuf so unordered blits and similar
+ * paths don't inherit stale state from a previous cmdbuf with the same handle
+ */
+void
+zink_init_cmdbuf_dynamic_state(struct zink_context *ctx, VkCommandBuffer cmdbuf)
+{
+   struct zink_screen *screen = zink_screen(ctx->base.screen);
+   if (screen->info.have_EXT_attachment_feedback_loop_dynamic_state)
+      VKCTX(CmdSetAttachmentFeedbackLoopEnableEXT)(cmdbuf, 0);
+}
+
 /* called on context creation and after flushing an old batch */
 void
 zink_start_batch(struct zink_context *ctx)
@@ -567,12 +591,9 @@ zink_start_batch(struct zink_context *ctx)
    /* descriptor buffers must always be bound at the start of a batch */
    if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB && !(ctx->flags & ZINK_CONTEXT_COPY_ONLY))
       zink_batch_bind_db(ctx);
-   /* zero init for unordered blits */
-   if (screen->info.have_EXT_attachment_feedback_loop_dynamic_state) {
-      VKCTX(CmdSetAttachmentFeedbackLoopEnableEXT)(ctx->bs->cmdbuf, 0);
-      VKCTX(CmdSetAttachmentFeedbackLoopEnableEXT)(ctx->bs->reordered_cmdbuf, 0);
-      VKCTX(CmdSetAttachmentFeedbackLoopEnableEXT)(ctx->bs->unsynchronized_cmdbuf, 0);
-   }
+   zink_init_cmdbuf_dynamic_state(ctx, ctx->bs->cmdbuf);
+   zink_init_cmdbuf_dynamic_state(ctx, ctx->bs->reordered_cmdbuf);
+   zink_init_cmdbuf_dynamic_state(ctx, ctx->bs->unsynchronized_cmdbuf);
 }
 
 /* common operations to run post submit; split out for clarity */
@@ -773,6 +794,185 @@ end:
 
    p_atomic_set(&bs->fence.submitted, true);
    unref_resources(screen, bs);
+}
+
+/* rpflush fast path: submit the in-progress cmdbufs as a sub-batch and swap
+ * in fresh ones, keeping the surrounding zink_batch_state intact.  caller
+ * must have verified the precondition (no externally-visible sync pending on
+ * bs).  no semaphores, no fence, no timeline updates: same-queue ordering
+ * guarantees correct execution against the eventual real submit on this bs.
+ */
+void
+zink_sub_batch_submit(struct zink_context *ctx)
+{
+   MESA_TRACE_FUNC();
+   struct zink_screen *screen = zink_screen(ctx->base.screen);
+   struct zink_batch_state *bs = ctx->bs;
+   VkResult result;
+
+   /* in threaded_submit mode, the prior batch's vkQueueSubmit happens on the
+    * submit thread; ensure it has run before our sub-batch enters the queue,
+    * otherwise on-queue ordering would put our work ahead of the prior batch
+    */
+   if (screen->threaded_submit && ctx->last_batch_state)
+      util_queue_fence_wait(&ctx->last_batch_state->flush_completed);
+
+   /* match submit_queue's host-read barrier on the sync cmdbuf */
+   VkCommandBuffer sync_cmdbuf = bs->has_work ? bs->cmdbuf :
+                                 bs->has_reordered_work ? bs->reordered_cmdbuf :
+                                 VK_NULL_HANDLE;
+   if (sync_cmdbuf) {
+      VkMemoryBarrier mb;
+      mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+      mb.pNext = NULL;
+      mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+      VKSCR(CmdPipelineBarrier)(sync_cmdbuf,
+                                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                VK_PIPELINE_STAGE_HOST_BIT,
+                                0, 1, &mb, 0, NULL, 0, NULL);
+   }
+
+   if (bs->has_reordered_work) {
+      if (bs->unordered_write_access) {
+         VkMemoryBarrier mb;
+         mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+         mb.pNext = NULL;
+         mb.srcAccessMask = bs->unordered_write_access;
+         mb.dstAccessMask = VK_ACCESS_NONE;
+         VKSCR(CmdPipelineBarrier)(bs->reordered_cmdbuf,
+                                   bs->unordered_write_stages,
+                                   screen->info.have_KHR_synchronization2 ? VK_PIPELINE_STAGE_NONE : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                   0, 1, &mb, 0, NULL, 0, NULL);
+      }
+      VRAM_ALLOC_LOOP(result,
+         VKSCR(EndCommandBuffer)(bs->reordered_cmdbuf),
+         if (result != VK_SUCCESS) {
+            mesa_loge("ZINK: sub-batch vkEndCommandBuffer (reordered) failed (%s)", vk_Result_to_str(result));
+            bs->is_device_lost = true;
+            return;
+         }
+      );
+   }
+
+   if (bs->has_work) {
+      VRAM_ALLOC_LOOP(result,
+         VKSCR(EndCommandBuffer)(bs->cmdbuf),
+         if (result != VK_SUCCESS) {
+            mesa_loge("ZINK: sub-batch vkEndCommandBuffer failed (%s)", vk_Result_to_str(result));
+            bs->is_device_lost = true;
+            return;
+         }
+      );
+   }
+
+   VkCommandBuffer cmdbufs[2];
+   unsigned c = 0;
+   if (bs->has_reordered_work)
+      cmdbufs[c++] = bs->reordered_cmdbuf;
+   if (bs->has_work)
+      cmdbufs[c++] = bs->cmdbuf;
+
+   VkSubmitInfo si = {0};
+   si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+   si.commandBufferCount = c;
+   si.pCommandBuffers = cmdbufs;
+
+   simple_mtx_lock(&screen->queue_lock);
+   VRAM_ALLOC_LOOP(result,
+      VKSCR(QueueSubmit)(screen->queue, 1, &si, VK_NULL_HANDLE),
+      if (result != VK_SUCCESS) {
+         mesa_loge("ZINK: sub-batch vkQueueSubmit failed (%s)", vk_Result_to_str(result));
+         bs->is_device_lost = true;
+      }
+   );
+   simple_mtx_unlock(&screen->queue_lock);
+
+   if (bs->is_device_lost)
+      return;
+
+   if (bs->has_work)
+      util_dynarray_append(&bs->sub_batch_cmdbufs, VkCommandBuffer, bs->cmdbuf);
+   if (bs->has_reordered_work)
+      util_dynarray_append(&bs->sub_batch_cmdbufs, VkCommandBuffer, bs->reordered_cmdbuf);
+
+   VkCommandBufferAllocateInfo cbai = {0};
+   cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+   cbai.commandPool = bs->cmdpool;
+   cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+
+   VkCommandBufferBeginInfo cbbi = {0};
+   cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+   cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+   /* allocate both fresh cmdbufs in one call when the common case (both
+    * recording arms used) holds, otherwise fall back to a single allocate
+    */
+   VkCommandBuffer fresh[2];
+   if (bs->has_work && bs->has_reordered_work) {
+      cbai.commandBufferCount = 2;
+      VRAM_ALLOC_LOOP(result,
+         VKSCR(AllocateCommandBuffers)(screen->dev, &cbai, fresh),
+         if (result != VK_SUCCESS) {
+            mesa_loge("ZINK: sub-batch vkAllocateCommandBuffers failed (%s)", vk_Result_to_str(result));
+            bs->is_device_lost = true;
+            return;
+         }
+      );
+      bs->cmdbuf = fresh[0];
+      bs->reordered_cmdbuf = fresh[1];
+   } else if (bs->has_work) {
+      cbai.commandBufferCount = 1;
+      VRAM_ALLOC_LOOP(result,
+         VKSCR(AllocateCommandBuffers)(screen->dev, &cbai, &bs->cmdbuf),
+         if (result != VK_SUCCESS) {
+            mesa_loge("ZINK: sub-batch vkAllocateCommandBuffers failed (%s)", vk_Result_to_str(result));
+            bs->is_device_lost = true;
+            return;
+         }
+      );
+   } else if (bs->has_reordered_work) {
+      cbai.commandBufferCount = 1;
+      VRAM_ALLOC_LOOP(result,
+         VKSCR(AllocateCommandBuffers)(screen->dev, &cbai, &bs->reordered_cmdbuf),
+         if (result != VK_SUCCESS) {
+            mesa_loge("ZINK: sub-batch vkAllocateCommandBuffers (reordered) failed (%s)", vk_Result_to_str(result));
+            bs->is_device_lost = true;
+            return;
+         }
+      );
+   }
+
+   if (bs->has_work) {
+      VRAM_ALLOC_LOOP(result,
+         VKSCR(BeginCommandBuffer)(bs->cmdbuf, &cbbi),
+         if (result != VK_SUCCESS) {
+            mesa_loge("ZINK: sub-batch vkBeginCommandBuffer failed (%s)", vk_Result_to_str(result));
+            bs->is_device_lost = true;
+            return;
+         }
+      );
+      zink_init_cmdbuf_dynamic_state(ctx, bs->cmdbuf);
+      bs->has_work = false;
+   }
+
+   if (bs->has_reordered_work) {
+      VRAM_ALLOC_LOOP(result,
+         VKSCR(BeginCommandBuffer)(bs->reordered_cmdbuf, &cbbi),
+         if (result != VK_SUCCESS) {
+            mesa_loge("ZINK: sub-batch vkBeginCommandBuffer (reordered) failed (%s)", vk_Result_to_str(result));
+            bs->is_device_lost = true;
+            return;
+         }
+      );
+      zink_init_cmdbuf_dynamic_state(ctx, bs->reordered_cmdbuf);
+      bs->has_reordered_work = false;
+      bs->unordered_write_access = 0;
+      bs->unordered_write_stages = 0;
+   }
+
+   if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB && !(ctx->flags & ZINK_CONTEXT_COPY_ONLY))
+      zink_batch_bind_db(ctx);
 }
 
 /* called during flush */

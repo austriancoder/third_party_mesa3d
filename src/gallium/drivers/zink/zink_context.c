@@ -3548,6 +3548,39 @@ zink_reset_ds3_states(struct zink_context *ctx)
       ctx->ds3_states &= ~BITFIELD_BIT(ZINK_DS3_RAST_STIPPLE);
 }
 
+/* per-cmdbuf state re-emission run after either a full batch rotation or a
+ * sub-batch cmdbuf swap; only handles state that lives on the cmdbuf and
+ * needs to be re-set whenever the cmdbuf is replaced.
+ */
+static void
+start_cmdbuf_state(struct zink_context *ctx)
+{
+   struct zink_screen *screen = zink_screen(ctx->base.screen);
+   if (screen->info.have_EXT_transform_feedback && ctx->num_so_targets)
+      ctx->dirty_so_targets = true;
+   /* load-bearing for ZINK_DEBUG=rpflush: marking pipeline_changed and
+    * re-selecting the dispatch tables here is what makes the next draw
+    * after a flush go through the BATCH_CHANGED template variant, which
+    * the rpflush drain+redispatch path in zink_draw.cpp depends on.
+    */
+   ctx->pipeline_changed[0] = ctx->pipeline_changed[1] = true;
+   zink_select_draw_vbo(ctx);
+   zink_select_launch_grid(ctx);
+
+   zink_reset_ds3_states(ctx);
+
+   ctx->dd.bindless_bound = false;
+   ctx->sample_locations_changed = ctx->gfx_pipeline_state.sample_locations_enabled;
+   if (screen->info.dynamic_state2_feats.extendedDynamicState2PatchControlPoints) {
+      VKCTX(CmdSetPatchControlPointsEXT)(ctx->bs->cmdbuf, ctx->gfx_pipeline_state.dyn_state2.vertices_per_patch);
+      VKCTX(CmdSetPatchControlPointsEXT)(ctx->bs->reordered_cmdbuf, 1);
+   }
+   update_feedback_loop_dynamic_state(ctx);
+   if (screen->info.have_EXT_color_write_enable)
+      reapply_color_write(ctx);
+   update_layered_rendering_state(ctx);
+}
+
 static void
 flush_batch(struct zink_context *ctx, bool sync)
 {
@@ -3568,31 +3601,15 @@ flush_batch(struct zink_context *ctx, bool sync)
    if (ctx->bs->is_device_lost) {
       check_device_lost(ctx);
    } else {
-      struct zink_screen *screen = zink_screen(ctx->base.screen);
       zink_start_batch(ctx);
-      if (screen->info.have_EXT_transform_feedback && ctx->num_so_targets)
-         ctx->dirty_so_targets = true;
-      ctx->pipeline_changed[0] = ctx->pipeline_changed[1] = true;
-      zink_select_draw_vbo(ctx);
-      zink_select_launch_grid(ctx);
+      start_cmdbuf_state(ctx);
 
       if (ctx->oom_stall)
          stall(ctx);
-      zink_reset_ds3_states(ctx);
 
       ctx->oom_flush = false;
       ctx->oom_stall = false;
-      ctx->dd.bindless_bound = false;
       ctx->di.bindless_refs_dirty = true;
-      ctx->sample_locations_changed = ctx->gfx_pipeline_state.sample_locations_enabled;
-      if (zink_screen(ctx->base.screen)->info.dynamic_state2_feats.extendedDynamicState2PatchControlPoints) {
-         VKCTX(CmdSetPatchControlPointsEXT)(ctx->bs->cmdbuf, ctx->gfx_pipeline_state.dyn_state2.vertices_per_patch);
-         VKCTX(CmdSetPatchControlPointsEXT)(ctx->bs->reordered_cmdbuf, 1);
-      }
-      update_feedback_loop_dynamic_state(ctx);
-      if (screen->info.have_EXT_color_write_enable)
-         reapply_color_write(ctx);
-      update_layered_rendering_state(ctx);
       tc_renderpass_info_reset(&ctx->dynamic_fb.tc_info);
       ctx->rp_tc_info_updated = true;
    }
@@ -3605,12 +3622,60 @@ zink_flush_queue(struct zink_context *ctx)
    flush_batch(ctx, true);
 }
 
+/* the fast path may only run when the current batch state has no
+ * externally-visible synchronization commitments pending; otherwise
+ * dropping them in a sub-batch silently breaks signal/wait pairs and
+ * leaves the rest of zink waiting on a usage that never clears.
+ *
+ * MAINTENANCE: this list must include every bs field that submit_queue
+ * (zink_batch.c) consumes for cross-process / cross-queue / external sync.
+ * if you add new bs-tracked external state, also add it here.
+ */
+static bool
+sub_batch_safe(struct zink_context *ctx, struct zink_batch_state *bs)
+{
+   if (ctx->swapchain)
+      return false;
+   if (bs->present || bs->swapchain)
+      return false;
+   if (bs->sparse_semaphore)
+      return false;
+   if (bs->signal_semaphore)
+      return false;
+   if (bs->dmabuf_exports.entries)
+      return false;
+   if (util_dynarray_num_elements(&bs->wait_semaphores, VkSemaphore))
+      return false;
+   if (util_dynarray_num_elements(&bs->fd_wait_semaphores, VkSemaphore))
+      return false;
+   if (util_dynarray_num_elements(&bs->signal_semaphores, VkSemaphore))
+      return false;
+   if (util_dynarray_num_elements(&bs->acquires, VkSemaphore))
+      return false;
+   if (bs->has_unsync)
+      return false;
+   return true;
+}
+
 void
 zink_flush_pending_rpflush(struct zink_context *ctx)
 {
+   ctx->rpflush_pending = false;
+
+   /* fast path: when the current batch has no externally-visible sync
+    * pending, do a v1-style cmdbuf swap on the same bs instead of rotating
+    * the entire batch state. avoids zink_end_batch / get_batch_state /
+    * submit_queue / threaded_submit job dispatch overhead.
+    */
+   if (sub_batch_safe(ctx, ctx->bs)) {
+      zink_sub_batch_submit(ctx);
+      if (!ctx->bs->is_device_lost)
+         start_cmdbuf_state(ctx);
+      return;
+   }
+
    /* the new batch must not race ahead of prev_bs's submit thread job */
    struct zink_batch_state *prev_bs = ctx->bs;
-   ctx->rpflush_pending = false;
    flush_batch(ctx, false);
    sync_flush(ctx, prev_bs);
 }

@@ -658,6 +658,10 @@ struct zink_batch_state {
 
    /* rpflush: number of renderpasses started in this batch (for skip-first-rp gate) */
    unsigned rp_count;
+   /* rpflush fast path: cmdbufs that have been sub-batch-submitted but are
+    * still alive in cmdpool; freed at the next reset_batch_state_internal
+    */
+   struct util_dynarray sub_batch_cmdbufs;
 };
 
 static inline struct zink_batch_state *

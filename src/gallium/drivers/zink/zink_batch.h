@@ -62,6 +62,12 @@ void
 zink_end_batch(struct zink_context *ctx);
 
 void
+zink_sub_batch_submit(struct zink_context *ctx);
+
+void
+zink_init_cmdbuf_dynamic_state(struct zink_context *ctx, VkCommandBuffer cmdbuf);
+
+void
 zink_batch_reference_resource_rw(struct zink_context *ctx,
                                  struct zink_resource *res,
                                  bool write);
