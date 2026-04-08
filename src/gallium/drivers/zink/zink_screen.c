@@ -120,6 +120,7 @@ zink_debug_options[] = {
    { "quiet", ZINK_DEBUG_QUIET, "Suppress warnings" },
    { "ioopt", ZINK_DEBUG_IOOPT, "Optimize IO" },
    { "nopc", ZINK_DEBUG_NOPC, "No precompilation" },
+   { "rpflush", ZINK_DEBUG_RPFLUSH, "Flush batch after every render pass" },
    DEBUG_NAMED_VALUE_END
 };
 

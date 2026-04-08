@@ -20,6 +20,24 @@
 #include "util/u_prim_restart.h"
 #include "util/perf/cpu_trace.h"
 
+/* drain a pending per-RP flush armed by zink_batch_no_rp_safe; returns true
+ * if a drain happened, in which case the caller must re-dispatch through
+ * the gallium callback and return.  the drain rotates the batch state and
+ * flush_batch re-points the dispatch table at the BATCH_CHANGED template
+ * variant, but the current call frame is locked into the !BATCH_CHANGED
+ * template at compile time and would skip the state re-emission the new
+ * cmdbuf needs.
+ */
+ALWAYS_INLINE static bool
+maybe_drain_rpflush(struct zink_context *ctx)
+{
+   if (likely(!(zink_debug & ZINK_DEBUG_RPFLUSH) || !ctx->rpflush_pending))
+      return false;
+
+   zink_flush_pending_rpflush(ctx);
+   return true;
+}
+
 static void
 zink_emit_xfb_counter_barrier(struct zink_context *ctx)
 {
@@ -952,6 +970,10 @@ zink_draw_vbo(struct pipe_context *pctx,
               unsigned num_draws)
 {
    MESA_TRACE_FUNC();
+   if (unlikely(maybe_drain_rpflush(zink_context(pctx)))) {
+      pctx->draw_vbo(pctx, info, drawid_offset, indirect, draws, num_draws);
+      return;
+   }
    zink_draw<HAS_MULTIDRAW, DYNAMIC_STATE, BATCH_CHANGED, false>(pctx, info, drawid_offset, indirect, draws, num_draws, NULL, 0);
 }
 
@@ -1018,6 +1040,10 @@ zink_draw_vertex_state(struct pipe_context *pctx,
    dinfo.instance_count = 1;
    dinfo.index.resource = vstate->input.indexbuf;
    struct zink_context *ctx = zink_context(pctx);
+   if (unlikely(maybe_drain_rpflush(ctx))) {
+      pctx->draw_vertex_state(pctx, vstate, partial_velem_mask, info, draws, num_draws);
+      return;
+   }
    struct zink_resource *res = zink_resource(vstate->input.vbuffer.buffer.resource);
    zink_screen(ctx->base.screen)->buffer_barrier(ctx, res, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
                                 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
@@ -1038,6 +1064,10 @@ static void
 zink_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
 {
    struct zink_context *ctx = zink_context(pctx);
+   if (unlikely(maybe_drain_rpflush(ctx))) {
+      pctx->launch_grid(pctx, info);
+      return;
+   }
    struct zink_batch_state *bs = ctx->bs;
    struct zink_screen *screen = zink_screen(pctx->screen);
 

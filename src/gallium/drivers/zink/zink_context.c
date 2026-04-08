@@ -3159,6 +3159,8 @@ zink_batch_rp(struct zink_context *ctx)
    ctx->hud.render_passes++;
 
    if (!in_rp && ctx->in_rp) {
+      /* count only true RP starts (not layout-change refreshes) for rpflush gate */
+      ctx->bs->rp_count++;
       /* only hit this for valid swapchain and new renderpass */
       if (ctx->render_condition.query)
          zink_start_conditional_render(ctx);
@@ -3195,6 +3197,15 @@ zink_batch_no_rp_safe(struct zink_context *ctx)
       ctx->in_rp = false;
    }
    assert(!ctx->in_rp);
+
+   /* arm a deferred flush at the next draw entry point so the GPU can start
+    * processing the just-ended RP while the CPU records the next one; the
+    * first RP of a batch has nothing to pipeline against yet, so flushing
+    * then would be pure overhead.
+    */
+   if ((zink_debug & ZINK_DEBUG_RPFLUSH) && !ctx->unordered_blitting &&
+       ctx->bs->has_work && ctx->bs->rp_count > 1)
+      ctx->rpflush_pending = true;
 }
 
 void
@@ -3592,6 +3603,16 @@ void
 zink_flush_queue(struct zink_context *ctx)
 {
    flush_batch(ctx, true);
+}
+
+void
+zink_flush_pending_rpflush(struct zink_context *ctx)
+{
+   /* the new batch must not race ahead of prev_bs's submit thread job */
+   struct zink_batch_state *prev_bs = ctx->bs;
+   ctx->rpflush_pending = false;
+   flush_batch(ctx, false);
+   sync_flush(ctx, prev_bs);
 }
 
 static bool

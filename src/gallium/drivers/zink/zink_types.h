@@ -241,6 +241,7 @@ enum zink_debug {
    ZINK_DEBUG_QUIET = (1<<18),
    ZINK_DEBUG_IOOPT = (1<<19),
    ZINK_DEBUG_NOPC = (1<<20),
+   ZINK_DEBUG_RPFLUSH = (1<<21),
 };
 
 enum zink_pv_emulation_primitive {
@@ -654,6 +655,9 @@ struct zink_batch_state {
    bool has_work;
    bool has_reordered_work;
    bool has_unsync;
+
+   /* rpflush: number of renderpasses started in this batch (for skip-first-rp gate) */
+   unsigned rp_count;
 };
 
 static inline struct zink_batch_state *
@@ -1867,6 +1871,7 @@ struct zink_context {
    VkExtent2D swapchain_size;
    bool fb_changed;
    bool in_rp; //renderpass is currently active
+   bool rpflush_pending; //deferred per-RP flush (ZINK_DEBUG_RPFLUSH)
    bool rp_changed; //force renderpass restart
    bool rp_layout_changed; //renderpass changed, maybe restart
    bool rp_loadop_changed; //renderpass changed, don't restart
