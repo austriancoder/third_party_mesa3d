@@ -4148,6 +4148,27 @@ zink_flush(struct pipe_context *pctx,
       tc_driver_internal_flush_notify(ctx->tc);
    } else {
       bs = ctx->bs;
+      /* fast path: when no fence is requested and the bs has no
+       * externally-visible sync pending, do a sub-batch submit on the same
+       * bs instead of the full flush_batch rotation.  saves the per-frame
+       * zink_end_batch / get_batch_state / submit_queue / threaded_submit
+       * job dispatch overhead.  this is the typical glmark2 SwapBuffers
+       * path (pfence == NULL).
+       */
+      if (!pfence && !deferred && !ctx->deferred_fence &&
+          !(flags & PIPE_FLUSH_FENCE_FD) &&
+          !bs->active_queries.entries &&
+          sub_batch_safe(ctx, bs)) {
+         zink_batch_no_rp_safe(ctx);
+         ctx->rpflush_pending = false;
+         zink_sub_batch_submit(ctx);
+         if (!ctx->bs->is_device_lost) {
+            start_cmdbuf_state(ctx);
+            if (ctx->tc && !ctx->track_renderpasses)
+               tc_driver_internal_flush_notify(ctx->tc);
+         }
+         return;
+      }
       if (deferred && !(flags & PIPE_FLUSH_FENCE_FD) && pfence)
          deferred_fence = true;
       else
