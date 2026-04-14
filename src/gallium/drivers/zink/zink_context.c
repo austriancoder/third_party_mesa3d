@@ -3159,6 +3159,7 @@ zink_batch_rp(struct zink_context *ctx)
    ctx->hud.render_passes++;
 
    if (!in_rp && ctx->in_rp) {
+      ctx->bs->rp_count++;
       /* only hit this for valid swapchain and new renderpass */
       if (ctx->render_condition.query)
          zink_start_conditional_render(ctx);
@@ -3195,6 +3196,10 @@ zink_batch_no_rp_safe(struct zink_context *ctx)
       ctx->in_rp = false;
    }
    assert(!ctx->in_rp);
+
+   if (!ctx->unordered_blitting &&
+       ctx->bs->has_work && ctx->bs->rp_count > 1)
+      ctx->rpflush_pending = true;
 }
 
 void
@@ -3592,6 +3597,13 @@ void
 zink_flush_queue(struct zink_context *ctx)
 {
    flush_batch(ctx, true);
+}
+
+void
+zink_flush_pending_rpflush(struct zink_context *ctx)
+{
+   ctx->rpflush_pending = false;
+   flush_batch(ctx, false);
 }
 
 static bool

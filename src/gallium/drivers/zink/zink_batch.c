@@ -193,6 +193,7 @@ zink_reset_batch_state(struct zink_context *ctx, struct zink_batch_state *bs)
    bs->has_work = false;
    bs->has_reordered_work = false;
    bs->has_unsync = false;
+   bs->rp_count = 0;
 }
 
 /* this is where deferred resource unrefs occur */

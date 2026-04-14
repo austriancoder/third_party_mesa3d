@@ -20,6 +20,23 @@
 #include "util/u_prim_restart.h"
 #include "util/perf/cpu_trace.h"
 
+ALWAYS_INLINE static bool
+maybe_drain_rpflush(struct zink_context *ctx)
+{
+   if (likely(!ctx->rpflush_pending))
+      return false;
+
+   /* arming skips unordered_blitting (not app-facing RPs), but draining
+    * must also skip ctx->blitting: rpflush may have been armed before a
+    * blit started, and the blitter's internal draw must not flush.
+    */
+   if (ctx->blitting || ctx->unordered_blitting)
+      return false;
+
+   zink_flush_pending_rpflush(ctx);
+   return true;
+}
+
 static void
 zink_emit_xfb_counter_barrier(struct zink_context *ctx)
 {
@@ -952,6 +969,11 @@ zink_draw_vbo(struct pipe_context *pctx,
               unsigned num_draws)
 {
    MESA_TRACE_FUNC();
+   if (unlikely(maybe_drain_rpflush(zink_context(pctx)))) {
+      pctx->draw_vbo(pctx, info, drawid_offset, indirect, draws, num_draws);
+      return;
+   }
+
    zink_draw<HAS_MULTIDRAW, DYNAMIC_STATE, BATCH_CHANGED, false>(pctx, info, drawid_offset, indirect, draws, num_draws, NULL, 0);
 }
 
@@ -1011,13 +1033,17 @@ zink_draw_vertex_state(struct pipe_context *pctx,
                        const struct pipe_draw_start_count_bias *draws,
                        unsigned num_draws)
 {
-   struct pipe_draw_info dinfo = {};
+   struct zink_context *ctx = zink_context(pctx);
+   if (unlikely(maybe_drain_rpflush(ctx))) {
+      pctx->draw_vertex_state(pctx, vstate, partial_velem_mask, info, draws, num_draws);
+      return;
+   }
 
+   struct pipe_draw_info dinfo = {};
    dinfo.mode = info.mode;
    dinfo.index_size = 4;
    dinfo.instance_count = 1;
    dinfo.index.resource = vstate->input.indexbuf;
-   struct zink_context *ctx = zink_context(pctx);
    struct zink_resource *res = zink_resource(vstate->input.vbuffer.buffer.resource);
    zink_screen(ctx->base.screen)->buffer_barrier(ctx, res, VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
                                 VK_PIPELINE_STAGE_VERTEX_INPUT_BIT);
@@ -1038,6 +1064,11 @@ static void
 zink_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
 {
    struct zink_context *ctx = zink_context(pctx);
+   if (unlikely(maybe_drain_rpflush(ctx))) {
+      pctx->launch_grid(pctx, info);
+      return;
+   }
+
    struct zink_batch_state *bs = ctx->bs;
    struct zink_screen *screen = zink_screen(pctx->screen);
 

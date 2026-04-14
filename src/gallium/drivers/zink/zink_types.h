@@ -654,6 +654,8 @@ struct zink_batch_state {
    bool has_work;
    bool has_reordered_work;
    bool has_unsync;
+
+   unsigned rp_count;
 };
 
 static inline struct zink_batch_state *
@@ -1867,6 +1869,7 @@ struct zink_context {
    VkExtent2D swapchain_size;
    bool fb_changed;
    bool in_rp; //renderpass is currently active
+   bool rpflush_pending; //deferred per-RP flush
    bool rp_changed; //force renderpass restart
    bool rp_layout_changed; //renderpass changed, maybe restart
    bool rp_loadop_changed; //renderpass changed, don't restart
